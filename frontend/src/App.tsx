@@ -6,8 +6,8 @@ import { MCPToolStrip } from './components/MCPToolStrip';
 import { MCPRegistryModal } from './components/MCPRegistryModal';
 import { StreamOutputPanel } from './components/StreamOutputPanel';
 import { TelemetryLedger } from './components/TelemetryLedger';
-import { fetchMCPStatus, fetchMetrics, streamChat } from './api/streamClient';
-import { MCPStatusResponse, MCPToolEvent, MetricsSummary, PrivacyEvent, TelemetryEvent } from './types';
+import { fetchHealth, fetchMCPStatus, fetchMetrics, streamChat } from './api/streamClient';
+import { HealthStatus, MCPStatusResponse, MCPToolEvent, MetricsSummary, PrivacyEvent, TelemetryEvent } from './types';
 
 const MODEL_MAP: Record<string, string> = {
   openai: 'gpt-4o-mini',
@@ -32,14 +32,53 @@ export default function App() {
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [healthStatus, setHealthStatus] = useState<'online' | 'offline'>('offline');
 
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  const checkHealth = useCallback(async () => {
+    try {
+      const data = await fetchHealth();
+      if (data.status === 'ok') {
+        setHealth(data);
+        setHealthStatus('online');
+        return true;
+      }
+    } catch {
+      setHealthStatus('offline');
+    }
+    return false;
+  }, []);
+
+  // Initial health probe on mount
+  useEffect(() => {
+    checkHealth();
+  }, [checkHealth]);
+
+  // Poll /health every 10 seconds while offline; stop once online
+  useEffect(() => {
+    if (healthStatus === 'online') return;
+
+    const intervalId = setInterval(async () => {
+      const isOnline = await checkHealth();
+      if (isOnline) {
+        clearInterval(intervalId);
+      }
+    }, 10000);
+
+    return () => clearInterval(intervalId);
+  }, [healthStatus, checkHealth]);
 
   const handleRefreshMCP = useCallback(async () => {
     setIsRefreshingMCP(true);
     try {
       const data = await fetchMCPStatus();
       setMcpStatus(data);
+      if (data.status === 'online') {
+        setHealthStatus('online');
+        setHealth((prev) => prev ?? { status: 'ok', mock_mode: true });
+      }
     } catch (err) {
       console.warn('Failed to fetch MCP status:', err);
     } finally {
@@ -89,9 +128,15 @@ export default function App() {
         onDelta: (chunk) => setResponseText((prev) => prev + chunk),
         onTelemetry: (t) => {
           setTelemetry(t);
+          setHealthStatus('online');
+          setHealth((prev) => prev ?? { status: 'ok', mock_mode: true });
           handleRefreshMetrics();
         },
-        onDone: () => setIsStreaming(false),
+        onDone: () => {
+          setIsStreaming(false);
+          setHealthStatus('online');
+          setHealth((prev) => prev ?? { status: 'ok', mock_mode: true });
+        },
         onError: (err) => {
           setError(err.message || 'Stream connection interrupted');
           setIsStreaming(false);
@@ -129,6 +174,8 @@ export default function App() {
         isStreaming={isStreaming}
         mcpStatus={mcpStatus}
         onOpenMCPModal={() => setIsMCPModalOpen(true)}
+        health={health}
+        healthStatus={healthStatus}
       />
 
       {/* Right Main Workspace */}

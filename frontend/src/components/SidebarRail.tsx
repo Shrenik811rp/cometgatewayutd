@@ -1,5 +1,4 @@
-import React, { useEffect, useState } from 'react';
-import { fetchHealth } from '../api/streamClient';
+import React from 'react';
 import { HealthStatus, MCPStatusResponse } from '../types';
 
 interface SidebarRailProps {
@@ -13,6 +12,8 @@ interface SidebarRailProps {
   isStreaming: boolean;
   mcpStatus?: MCPStatusResponse | null;
   onOpenMCPModal?: () => void;
+  health?: HealthStatus | null;
+  healthStatus?: 'online' | 'offline';
 }
 
 const PRESET_CASES = [
@@ -54,22 +55,9 @@ export const SidebarRail: React.FC<SidebarRailProps> = ({
   isStreaming,
   mcpStatus,
   onOpenMCPModal,
+  health,
+  healthStatus = health?.status === 'ok' ? 'online' : 'offline',
 }) => {
-  const [health, setHealth] = useState<HealthStatus | null>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    fetchHealth()
-      .then((data) => {
-        if (mounted) setHealth(data);
-      })
-      .catch(() => {
-        if (mounted) setHealth(null);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   return (
     <aside className="w-full lg:w-[340px] shrink-0 bg-[#E5DFD5] border-b-2 lg:border-b-0 lg:border-r-2 border-[#141413] p-7 lg:p-8 flex flex-col justify-between gap-7">
@@ -86,12 +74,12 @@ export const SidebarRail: React.FC<SidebarRailProps> = ({
           {/* Single Status Pill & Clickable FastMCP Pill */}
           <div className="mt-4 flex flex-col gap-2.5">
             <div className="inline-flex items-center gap-2 px-3 py-1 bg-white border-2 border-[#141413] shadow-[2px_2px_0px_#141413] font-mono text-[11px] font-bold uppercase tracking-wider text-[#141413]">
-              <span className={`w-2 h-2 ${health?.status === 'ok' ? 'bg-[#154734]' : 'bg-[#E85D2A]'}`} />
+              <span className={`w-2 h-2 ${healthStatus === 'online' ? 'bg-[#154734]' : 'bg-[#E85D2A]'}`} />
               <span>
-                {health?.status === 'ok'
-                  ? health.mock_mode
-                    ? 'ONLINE • MOCK'
-                    : 'ONLINE • LIVE'
+                {healthStatus === 'online'
+                  ? health?.mock_mode === false
+                    ? 'ONLINE • LIVE'
+                    : 'ONLINE • MOCK'
                   : 'OFFLINE'}
               </span>
             </div>
