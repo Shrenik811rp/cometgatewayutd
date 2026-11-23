@@ -1,0 +1,23 @@
+# Virtual environment & Python cache
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Sensitive environment variables & secrets (keep .env.example)
+.env
+.env.*
+!.env.example
+!frontend/.env.example
+
+# Local SQLite databases & telemetry
+*.db
+*.sqlite
+*.sqlite3
+telemetry.db
+
+# Dependencies & build artifacts
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
