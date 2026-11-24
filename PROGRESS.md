@@ -1,15 +1,13 @@
 # CometGateway — Build Progress & Checkpoint Tracker
 
 ## Current Status
-- **Active Phase:** COMPLETE — Production & Cloud Deployment Ready (Render + Vercel)
-- **Last Completed Checkpoint:** Split Cloud Deployment Safeguards (Centralized API client, Dynamic CORS, Render Blueprint, Vercel SPA config)
-- **Next Action:** Live cloud or local deployment (`http://localhost:5173` / Render + Vercel)
-- **Known Issues / Notes:** All core phases (0-5), architectural extensions (E.1-E.5, 7.1-7.6), and cloud deployment audit verified:
-  1. **Zero Hardcoded URLs & Centralized Config:** `frontend/src/api/config.ts` dynamically resolves `VITE_API_BASE_URL` (empty for Vite local proxy, full HTTPS URL for Vercel).
-  2. **Dynamic CORS & Streaming Anti-Buffering:** FastAPI dynamically parses `ALLOWED_ORIGINS` with fallback to `*`. SSE streaming preserves `Cache-Control: no-cache`, `Connection: keep-alive`, and `X-Accel-Buffering: no`.
-  3. **Resilient SQLite & Startup:** `telemetry.py` resolves absolute DB paths with directory creation.
-  4. **Render Blueprint & Dockerfile:** `render.yaml` specifies Python 3.11, healthcheck, environment vars; `backend/Dockerfile` dynamically binds to `${PORT:-8000}`.
-  5. **Automated Verification:** 17/17 pytest suite passed; production bundle `npm run build` passed with zero errors in 8.4s.
+- **Active Phase:** COMPLETE — Production Ready with Seamless Multi-Provider Fallback & 503 Retries
+- **Last Completed Checkpoint:** Pre-flight Missing Key Failover & Secondary Gemini 503 Spike Retries (19/19 tests passed)
+- **Next Action:** Deployed on Render + Vercel; live at `http://localhost:5173`
+- **Known Issues / Notes:** All core phases (0-5), extensions (E.1-E.5, 7.1-7.6), and cloud deployment audit verified:
+  1. **Pre-Flight Missing Key Failover:** Clicking OpenAI, Claude, or CometAI without configured API keys immediately and cleanly routes to an active Gemini model with `fallback_triggered = True` and zero error banner.
+  2. **Secondary Gemini 503 Spike Retries:** Automatic failover to secondary Gemini (`gemini/gemini-2.5-flash` or `gemini/gemini-2.0-flash`) upon 503 high demand or rate limit spikes. Error events are only emitted if all candidate models fail and zero content tokens were streamed.
+  3. **Automated Verification:** 19/19 backend pytest suite passed (including `test_missing_key_preflight_failover` and `test_gemini_503_secondary_retry`). Both `master` and `main` branches synchronized on GitHub.
 
 ---
 
