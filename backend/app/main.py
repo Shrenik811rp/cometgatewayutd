@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastmcp import Client
 
-from backend.app.config import resolve_latest_slim_gemini_model, settings
+from backend.app.config import resolve_available_gemini_models, settings
 from backend.app.mcp_server import mcp
 from backend.app.privacy import redact_pii
 from backend.app.router import stream_model_response
@@ -18,8 +18,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     # Dynamic Gemini model auto-discovery if live key is provided
     if not settings.mock_mode and settings.gemini_api_key:
-        latest_gemini = await resolve_latest_slim_gemini_model(settings.gemini_api_key)
-        settings.provider_models["gemini"] = latest_gemini
+        await resolve_available_gemini_models(settings.gemini_api_key)
     yield
 
 

@@ -1,14 +1,14 @@
 # CometGateway — Build Progress & Checkpoint Tracker
 
 ## Current Status
-- **Active Phase:** COMPLETE — Production Ready with Instant Pre-Flight Failover & Failover Status Banners
-- **Last Completed Checkpoint:** Instant Pre-Flight Provider Resolution, 15s Per-Chunk Fast Timeout, Multi-Gemini Retry & Failover Status UI Banners
+- **Active Phase:** COMPLETE — Production Ready with 100% Dynamic Gemini Model Discovery & Failover
+- **Last Completed Checkpoint:** Live Google Models API Discovery, Dynamic Recency & Tier Sorting, Lazy Chain Resolution, 404 Model Eviction & Wildcard Pricing (20/20 tests passed)
 - **Next Action:** Deployed on Render + Vercel; live at `http://localhost:5173`
 - **Known Issues / Notes:** All core phases (0-5), extensions (E.1-E.5, 7.1-7.6), and cloud deployment audit verified:
-  1. **Instant Pre-Flight Failover:** Selecting OpenAI, Claude, or CometAI without configured API keys bypasses doomed upstream network calls entirely and routes instantaneously to Gemini Flash-Lite.
-  2. **15s Stream Timeout & Unbroken Retries:** Connection timeout set to 15.0s, per-chunk streaming guarded by `asyncio.wait_for(..., timeout=15.0)`, and mid-stream errors reset partial buffers so secondary Gemini candidates deliver complete, unbroken responses.
-  3. **Failover UI Banners:** Both `StreamOutputPanel.tsx` and `TelemetryLedger.tsx` display real-time status banners: `⚡ FAILOVER TAKING PLACE: [REQUESTED_MODEL] UNAVAILABLE → AUTOMATICALLY SWITCHED TO [MODEL_USED]`.
-  4. **Automated Verification:** 19/19 backend pytest suite passed; frontend bundle passed `tsc && vite build` in 8.1s with 0 errors. Both `master` and `main` branches synchronized on GitHub.
+  1. **100% Dynamic Gemini Discovery:** Eliminated hardcoded version strings. Runtime discovery queries `https://generativelanguage.googleapis.com/v1beta/models`, filters out non-text/vision/embedding/robotics models, and sorts by tier priority (`flash-lite` > `hydrogen`/`flash` > general) and version recency.
+  2. **Lazy + Startup Discovery with 404 Eviction:** Resolves during FastAPI startup and lazily in `router.py` if cold-start timed out. Evicts 404 models from `settings.gemini_fallback_chain` dynamically upon encountering upstream deprecations.
+  3. **Wildcard & Prefix Token Pricing:** `get_model_pricing()` dynamically prices any discovered `flash-lite` or `flash` model automatically.
+  4. **Automated Verification:** 20/20 backend pytest suite passed (including `test_dynamic_gemini_discovery`); frontend bundle passed `tsc && vite build` in 4.78s with 0 errors. Both `master` and `main` branches synchronized on GitHub.
 
 ---
 

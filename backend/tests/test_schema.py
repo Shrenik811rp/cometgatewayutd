@@ -181,7 +181,7 @@ async def test_missing_key_preflight_failover():
 async def test_gemini_503_secondary_retry():
     async def mock_secondary_gemini_stream(*args, **kwargs):
         class MockDelta:
-            content = "Response from secondary Gemini 2.5 Flash after 503 spike."
+            content = "Response from dynamically discovered secondary Gemini Flash after 503 spike."
 
         class MockChoice:
             delta = MockDelta()
@@ -193,11 +193,15 @@ async def test_gemini_503_secondary_retry():
 
     orig_mock_mode = settings.mock_mode
     orig_gemini_key = settings.gemini_api_key
+    orig_chain = list(settings.gemini_fallback_chain)
     settings.mock_mode = False
     settings.gemini_api_key = "valid_test_gemini_key"
+    settings.gemini_fallback_chain = ["gemini/discovered-primary-flash-lite", "gemini/discovered-secondary-flash"]
+    settings.provider_models["gemini"] = "gemini/discovered-primary-flash-lite"
 
     try:
-        primary_model = settings.provider_models.get("gemini", "gemini/gemini-3.5-flash-lite")
+        primary_model = "gemini/discovered-primary-flash-lite"
+        secondary_model = "gemini/discovered-secondary-flash"
 
         async def mock_failing_primary(model, *args, **kwargs):
             if model == primary_model:
@@ -207,7 +211,7 @@ async def test_gemini_503_secondary_retry():
                     llm_provider="gemini",
                     model=model,
                 )
-            elif "2.5-flash" in model or "2.0-flash" in model:
+            elif model == secondary_model:
                 return mock_secondary_gemini_stream()
             raise ValueError(f"Unexpected retry model: {model}")
 
@@ -239,10 +243,62 @@ async def test_gemini_503_secondary_retry():
                 telemetry_event = events[-2]
                 assert telemetry_event["type"] == "telemetry"
                 assert telemetry_event["fallback_triggered"] is True
-                assert "2.5-flash" in telemetry_event["model_used"] or "2.0-flash" in telemetry_event["model_used"]
+                assert telemetry_event["model_used"] == secondary_model
     finally:
         settings.mock_mode = orig_mock_mode
         settings.gemini_api_key = orig_gemini_key
+        settings.gemini_fallback_chain = orig_chain
+        settings.provider_models["gemini"] = orig_chain[0] if orig_chain else "gemini/gemini-flash-lite-latest"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_gemini_discovery():
+    from backend.app.config import resolve_available_gemini_models
+
+    mock_api_response = {
+        "models": [
+            {
+                "name": "models/text-embedding-004",
+                "supportedGenerationMethods": ["embedContent"],
+            },
+            {
+                "name": "models/gemini-1.5-pro",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
+                "name": "models/gemini-2.0-flash",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
+                "name": "models/gemini-2.5-flash-lite-latest",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
+                "name": "models/gemini-robotics-experimental",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+        ]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = mock_api_response
+
+    orig_chain = list(settings.gemini_fallback_chain)
+    try:
+        with patch("httpx.AsyncClient.get", return_value=mock_resp):
+            discovered = await resolve_available_gemini_models("test-live-key")
+            assert len(discovered) >= 3
+            # Tier 0 (flash-lite) must be ranked first
+            assert discovered[0] == "gemini/gemini-2.5-flash-lite-latest"
+            # Non-generation and robotics must be excluded
+            assert not any("embed" in m for m in discovered)
+            assert not any("robotics" in m for m in discovered)
+            assert settings.provider_models["gemini"] == discovered[0]
+            assert settings.gemini_fallback_chain == discovered
+    finally:
+        settings.gemini_fallback_chain = orig_chain
+        settings.provider_models["gemini"] = orig_chain[0] if orig_chain else "gemini/gemini-flash-lite-latest"
 
 
 @pytest.mark.asyncio

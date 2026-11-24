@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 import litellm
 
-from backend.app.config import settings
+from backend.app.config import get_model_pricing, resolve_available_gemini_models, settings
 from backend.app.mcp_server import run_mcp_tool_for_prompt
 from backend.app.privacy import redact_pii
 from backend.app.schemas import ChatRequest, PrivacyReport, TelemetryMetrics
@@ -100,17 +100,7 @@ def get_model_for_request(request: ChatRequest) -> str:
 
 
 def calculate_cost(model_name: str, prompt_tokens: int, completion_tokens: int) -> float:
-    # Match pricing key
-    pricing = settings.pricing_per_1k.get(model_name)
-    if not pricing:
-        # Fallback search by model prefix
-        for key, p in settings.pricing_per_1k.items():
-            if key in model_name or model_name in key:
-                pricing = p
-                break
-    if not pricing:
-        pricing = {"input": 0.00015, "output": 0.00060}
-
+    pricing = get_model_pricing(model_name)
     input_cost = (prompt_tokens / 1000.0) * pricing["input"]
     output_cost = (completion_tokens / 1000.0) * pricing["output"]
     return round(input_cost + output_cost, 6)
@@ -216,14 +206,14 @@ async def stream_model_response(
 
         req_provider = request.provider.lower()
         requested_model = request.model or settings.provider_models.get(req_provider, req_provider)
-        primary_gemini = settings.provider_models.get("gemini", "gemini/gemini-3.5-flash-lite")
-        gemini_secondaries = ["gemini/gemini-2.5-flash", "gemini/gemini-2.0-flash"]
+        # Lazy discovery if settings.gemini_fallback_chain is empty and API key is set
+        if bool(settings.gemini_api_key and settings.gemini_api_key.strip()) and not settings.gemini_fallback_chain:
+            await resolve_available_gemini_models(settings.gemini_api_key)
 
-        # Build deduplicated Gemini candidate chain
-        deduped_gemini_chain: List[str] = [primary_gemini]
-        for m in gemini_secondaries:
-            if m not in deduped_gemini_chain:
-                deduped_gemini_chain.append(m)
+        primary_gemini = settings.provider_models.get("gemini") or (
+            settings.gemini_fallback_chain[0] if settings.gemini_fallback_chain else "gemini/gemini-flash-lite-latest"
+        )
+        gemini_chain: List[str] = list(settings.gemini_fallback_chain) if settings.gemini_fallback_chain else [primary_gemini]
 
         provider_has_key = has_provider_key(req_provider)
         gemini_available = bool(settings.gemini_api_key and settings.gemini_api_key.strip())
@@ -235,7 +225,7 @@ async def stream_model_response(
         if req_provider in ["openai", "anthropic", "claude", "cometai"] and not provider_has_key and gemini_available:
             fallback_triggered = True
             fallback_reason = f"{requested_model.upper()} API key not configured — failover taking place → switched to {primary_gemini}"
-            candidates.extend(deduped_gemini_chain)
+            candidates.extend(gemini_chain)
             # Emit failover event immediately so client UI shows failover banner right away
             failover_event = {
                 "type": "failover",
@@ -248,7 +238,7 @@ async def stream_model_response(
         else:
             candidates.append(model_name)
             if gemini_available:
-                for gm in deduped_gemini_chain:
+                for gm in gemini_chain:
                     if gm not in candidates:
                         candidates.append(gm)
 
@@ -287,6 +277,15 @@ async def stream_model_response(
             except Exception as stream_err:
                 last_err = stream_err
                 fallback_triggered = True
+                err_str = str(stream_err).lower()
+
+                # Evict 404 / NotFoundError from settings.gemini_fallback_chain so it's never retried
+                if "404" in err_str or "notfound" in err_str or "not found" in err_str:
+                    if candidate in settings.gemini_fallback_chain:
+                        settings.gemini_fallback_chain.remove(candidate)
+                        if settings.provider_models.get("gemini") == candidate and settings.gemini_fallback_chain:
+                            settings.provider_models["gemini"] = settings.gemini_fallback_chain[0]
+
                 # If error occurred mid-stream before completing, reset partial buffer so next candidate provides complete, unbroken response
                 if accumulated_content:
                     accumulated_content = []

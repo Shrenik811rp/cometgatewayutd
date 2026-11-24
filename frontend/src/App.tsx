@@ -12,7 +12,7 @@ import { HealthStatus, MCPStatusResponse, MCPToolEvent, MetricsSummary, PrivacyE
 const MODEL_MAP: Record<string, string> = {
   openai: 'gpt-4o-mini',
   anthropic: 'claude-3-5-haiku',
-  gemini: 'gemini-3.5-flash-lite',
+  gemini: 'gemini-flash-lite (dynamic)',
   cometai: 'openai/cometai-default',
 };
 

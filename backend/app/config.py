@@ -1,6 +1,13 @@
-from typing import Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional
 import httpx
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_GEMINI_FALLBACK = [
+    "gemini/gemini-flash-lite-latest",
+    "gemini/gemini-flash-latest",
+]
 
 
 class Settings(BaseSettings):
@@ -20,11 +27,14 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./telemetry.db"
     allowed_origins: str = "*"
 
+    # Dynamic Gemini Fallback Chain (populated via Google Models API)
+    gemini_fallback_chain: List[str] = Field(default_factory=lambda: list(DEFAULT_GEMINI_FALLBACK))
+
     # Default Provider-to-Model Mapping
     provider_models: Dict[str, str] = {
         "openai": "gpt-4o-mini",
         "anthropic": "claude-3-5-haiku-latest",
-        "gemini": "gemini/gemini-3.5-flash-lite",
+        "gemini": "gemini/gemini-flash-lite-latest",
         "cometai": "openai/cometai-default",
     }
 
@@ -46,90 +56,122 @@ class Settings(BaseSettings):
             "input": 0.00080,
             "output": 0.00400,
         },
-        "gemini/gemini-3.5-flash-lite": {
-            "input": 0.00030,
-            "output": 0.00250,
-        },
-        "gemini-3.5-flash-lite": {
-            "input": 0.00030,
-            "output": 0.00250,
-        },
-        "gemini/gemini-4-hydrogen": {
-            "input": 0.00150,
-            "output": 0.00750,
-        },
-        "gemini-4-hydrogen": {
-            "input": 0.00150,
-            "output": 0.00750,
-        },
-        "gemini/gemini-2.5-flash": {
-            "input": 0.000075,
-            "output": 0.00030,
-        },
-        "gemini-2.5-flash": {
-            "input": 0.000075,
-            "output": 0.00030,
-        },
-        "gemini/gemini-2.0-flash": {
-            "input": 0.00010,
-            "output": 0.00040,
-        },
-        "gemini-2.0-flash": {
-            "input": 0.00010,
-            "output": 0.00040,
-        },
     }
 
 
 settings = Settings()
 
 
-async def resolve_latest_slim_gemini_model(api_key: str) -> str:
+def get_model_pricing(model_name: str) -> Dict[str, float]:
     """
-    Dynamically discover Google Generative Language models via API.
-    Auto-discovers and targets the latest/slimmest free-tier Flash-Lite or Hydrogen model.
-    Falls back gracefully to gemini/gemini-3.5-flash-lite if unreachable or invalid.
+    Wildcard / prefix fallback for dynamic pricing lookup.
+    Automatically assigns appropriate rates for dynamically discovered Gemini Flash-Lite / Flash models.
     """
-    fallback = "gemini/gemini-3.5-flash-lite"
+    m = model_name.lower()
+    if model_name in settings.pricing_per_1k:
+        return settings.pricing_per_1k[model_name]
+    for k, p in settings.pricing_per_1k.items():
+        if k in m or m in k:
+            return p
+
+    # Dynamic wildcard fallbacks
+    if "flash-lite" in m:
+        return {"input": 0.00030, "output": 0.00250}
+    if "hydrogen" in m:
+        return {"input": 0.00150, "output": 0.00750}
+    if "flash" in m:
+        return {"input": 0.00010, "output": 0.00040}
+    if "claude" in m or "anthropic" in m:
+        return {"input": 0.00080, "output": 0.00400}
+    if "gpt" in m or "openai" in m:
+        return {"input": 0.00015, "output": 0.00060}
+
+    return {"input": 0.00015, "output": 0.00060}
+
+
+def parse_gemini_sort_key(model_id: str):
+    """
+    Sort key for Gemini models:
+    1. Tier: flash-lite (0) > hydrogen / flash (1) > other text (2)
+    2. Version recency: numeric version tuples descending
+    3. Latest alias preferred
+    """
+    m = model_id.lower()
+    if "flash-lite" in m:
+        tier = 0
+    elif "hydrogen" in m or "flash" in m:
+        tier = 1
+    else:
+        tier = 2
+
+    # Extract all digits for semantic version sorting
+    nums = [int(n) for n in re.findall(r"\d+", m)]
+    ver_tuple = tuple(nums[:3]) if nums else (0, 0)
+    is_latest = 1 if ("latest" in m or "default" in m) else 0
+
+    return (tier, [-x for x in ver_tuple], -is_latest, m)
+
+
+async def resolve_available_gemini_models(api_key: str) -> List[str]:
+    """
+    Query Google Generative Language Models API at runtime.
+    Discovers, filters, and ranks all available Gemini generation models.
+    Sets settings.gemini_fallback_chain and updates settings.provider_models['gemini'].
+    """
     if not api_key:
-        return fallback
+        if not settings.gemini_fallback_chain:
+            settings.gemini_fallback_chain = list(DEFAULT_GEMINI_FALLBACK)
+        settings.provider_models["gemini"] = settings.gemini_fallback_chain[0]
+        return settings.gemini_fallback_chain
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    excluded_keywords = [
+        "embed", "embedding", "vision", "audio", "tts",
+        "image", "imagen", "robotics", "deprecated", "aqa",
+    ]
+
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
-                return fallback
+                if not settings.gemini_fallback_chain:
+                    settings.gemini_fallback_chain = list(DEFAULT_GEMINI_FALLBACK)
+                settings.provider_models["gemini"] = settings.gemini_fallback_chain[0]
+                return settings.gemini_fallback_chain
+
             data = resp.json()
-            models: List[Dict] = data.get("models", [])
-            
-            # Find candidate models supporting generateContent
-            candidates = []
-            for m in models:
+            raw_models: List[Dict[str, Any]] = data.get("models", [])
+            valid_candidates: List[str] = []
+
+            for m in raw_models:
                 methods = m.get("supportedGenerationMethods", [])
                 name = m.get("name", "")  # e.g. "models/gemini-1.5-flash"
-                base_id = name.replace("models/", "")
-                if "generateContent" in methods and "gemini" in base_id.lower():
-                    candidates.append(base_id)
+                base_id = name.replace("models/", "").strip()
+                base_lower = base_id.lower()
 
-            # Preference hierarchy: flash-lite -> hydrogen -> flash
-            flash_lite_models = [c for c in candidates if "flash-lite" in c.lower()]
-            if flash_lite_models:
-                # Pick the latest (sorted reverse)
-                flash_lite_models.sort(reverse=True)
-                return f"gemini/{flash_lite_models[0]}"
+                # Generation support + gemini check
+                if "generateContent" not in methods or "gemini" not in base_lower:
+                    continue
 
-            hydrogen_models = [c for c in candidates if "hydrogen" in c.lower()]
-            if hydrogen_models:
-                hydrogen_models.sort(reverse=True)
-                return f"gemini/{hydrogen_models[0]}"
+                # Exclude embeddings, vision-only, tts, robotics, etc.
+                if any(bad in base_lower for bad in excluded_keywords):
+                    continue
 
-            flash_models = [c for c in candidates if "flash" in c.lower()]
-            if flash_models:
-                flash_models.sort(reverse=True)
-                return f"gemini/{flash_models[0]}"
+                litellm_id = f"gemini/{base_id}"
+                if litellm_id not in valid_candidates:
+                    valid_candidates.append(litellm_id)
 
-            return fallback
+            if valid_candidates:
+                valid_candidates.sort(key=parse_gemini_sort_key)
+                settings.gemini_fallback_chain = valid_candidates
+                settings.provider_models["gemini"] = valid_candidates[0]
+                return valid_candidates
+
     except Exception:
-        return fallback
+        pass
+
+    if not settings.gemini_fallback_chain:
+        settings.gemini_fallback_chain = list(DEFAULT_GEMINI_FALLBACK)
+    settings.provider_models["gemini"] = settings.gemini_fallback_chain[0]
+    return settings.gemini_fallback_chain
 
