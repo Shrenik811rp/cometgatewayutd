@@ -70,6 +70,14 @@ class Settings(BaseSettings):
             "input": 0.000075,
             "output": 0.00030,
         },
+        "gemini/gemini-2.0-flash": {
+            "input": 0.00010,
+            "output": 0.00040,
+        },
+        "gemini-2.0-flash": {
+            "input": 0.00010,
+            "output": 0.00040,
+        },
     }
 
 

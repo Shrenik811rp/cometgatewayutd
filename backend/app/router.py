@@ -4,7 +4,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 import litellm
 
 from backend.app.config import settings
@@ -68,6 +68,15 @@ MOCK_RESPONSES = {
         ),
     },
 }
+
+
+def is_valid_key(key: Optional[str]) -> bool:
+    if not key:
+        return False
+    k = key.strip().lower()
+    if not k or "your_" in k or "_key_here" in k or k == "placeholder":
+        return False
+    return True
 
 
 def get_model_for_request(request: ChatRequest) -> str:
@@ -169,70 +178,93 @@ async def stream_model_response(
         ]
 
         async def get_litellm_stream(target_model: str):
+            extra_kwargs: Dict[str, Any] = {}
             if "cometai" in target_model.lower() and settings.cometai_api_key:
-                return await litellm.acompletion(
-                    model=target_model,
-                    messages=messages,
-                    stream=True,
-                    api_base=settings.cometai_base_url,
-                    api_key=settings.cometai_api_key,
-                )
+                extra_kwargs["api_base"] = settings.cometai_base_url
+                extra_kwargs["api_key"] = settings.cometai_api_key
+            elif "gemini" in target_model.lower() and settings.gemini_api_key:
+                extra_kwargs["api_key"] = settings.gemini_api_key
+            elif ("gpt" in target_model.lower() or "openai" in target_model.lower()) and settings.openai_api_key:
+                extra_kwargs["api_key"] = settings.openai_api_key
+            elif "claude" in target_model.lower() and settings.anthropic_api_key:
+                extra_kwargs["api_key"] = settings.anthropic_api_key
+
             return await litellm.acompletion(
                 model=target_model,
                 messages=messages,
                 stream=True,
+                **extra_kwargs,
             )
 
-        stream = None
-        # Handle unconfigured CometAI key gracefully by falling over to Gemini immediately
-        if (request.provider.lower() == "cometai" or "cometai" in model_name.lower()) and not settings.cometai_api_key:
+        primary_gemini = settings.provider_models.get("gemini", "gemini/gemini-3.5-flash-lite")
+        gemini_secondaries = ["gemini/gemini-2.5-flash", "gemini/gemini-2.0-flash"]
+
+        # Pre-flight check: verify if requested provider has configured API key
+        req_provider = request.provider.lower()
+        has_key = True
+        if req_provider == "openai":
+            has_key = is_valid_key(settings.openai_api_key)
+        elif req_provider == "anthropic":
+            has_key = is_valid_key(settings.anthropic_api_key)
+        elif req_provider == "cometai":
+            has_key = is_valid_key(settings.cometai_api_key)
+        elif req_provider == "gemini":
+            has_key = is_valid_key(settings.gemini_api_key)
+
+        gemini_available = is_valid_key(settings.gemini_api_key) or bool(settings.gemini_api_key)
+
+        candidates: List[str] = []
+        if req_provider in ["openai", "anthropic", "cometai"] and not has_key and gemini_available:
+            # Immediate failover to Gemini without calling missing provider or emitting error banner
             fallback_triggered = True
-            fallback_model = settings.provider_models.get("gemini", "gemini/gemini-3.5-flash-lite")
-            model_name = fallback_model
-            try:
-                stream = await get_litellm_stream(fallback_model)
-            except Exception as comet_fallback_err:
-                error_event = {
-                    "type": "error",
-                    "message": f"CometAI upstream failover failed: {str(comet_fallback_err)}",
-                }
-                yield f"data: {json.dumps(error_event)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
+            candidates.append(primary_gemini)
+            for m in gemini_secondaries:
+                if m != primary_gemini and m not in candidates:
+                    candidates.append(m)
         else:
-            try:
-                stream = await get_litellm_stream(model_name)
-            except Exception as primary_err:
-                # Automatic fallback to Gemini on RateLimitError or primary model failure
+            candidates.append(model_name)
+            if "gemini" not in model_name.lower() and primary_gemini not in candidates:
+                candidates.append(primary_gemini)
+            for m in gemini_secondaries:
+                if m not in candidates:
+                    candidates.append(m)
+
+        last_err: Optional[Exception] = None
+        for candidate in candidates:
+            if candidate != model_name:
                 fallback_triggered = True
-                fallback_model = settings.provider_models.get("gemini", "gemini/gemini-3.5-flash-lite")
-                model_name = fallback_model
-                try:
-                    stream = await get_litellm_stream(fallback_model)
-                except Exception as fallback_err:
-                    # Both primary and fallback failed: emit graceful SSE error event and terminate
-                    error_event = {
-                        "type": "error",
-                        "message": f"Upstream provider error: {str(fallback_err or primary_err)}",
-                    }
-                    yield f"data: {json.dumps(error_event)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
 
-        try:
-            async for chunk in stream:
-                if first_chunk_time is None:
-                    first_chunk_time = time.perf_counter()
+            try:
+                stream = await get_litellm_stream(candidate)
+                async for chunk in stream:
+                    if first_chunk_time is None:
+                        first_chunk_time = time.perf_counter()
 
-                delta = chunk.choices[0].delta.content or ""
-                if delta:
-                    accumulated_content.append(delta)
-                    delta_event = {"type": "delta", "content": delta}
-                    yield f"data: {json.dumps(delta_event)}\n\n"
-        except Exception as stream_err:
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        accumulated_content.append(delta)
+                        delta_event = {"type": "delta", "content": delta}
+                        yield f"data: {json.dumps(delta_event)}\n\n"
+
+                # Successfully completed streaming from this candidate
+                model_name = candidate
+                last_err = None
+                break
+            except Exception as stream_err:
+                last_err = stream_err
+                fallback_triggered = True
+                # If content was already emitted to the user, do not restart with another model
+                if accumulated_content:
+                    model_name = candidate
+                    break
+                # Zero tokens were streamed: retry against next candidate model (e.g. secondary Gemini)
+                continue
+
+        # If all candidates failed and zero content tokens were streamed, emit graceful error event
+        if not accumulated_content and last_err is not None:
             error_event = {
                 "type": "error",
-                "message": f"Stream interrupted: {str(stream_err)}",
+                "message": f"Upstream provider error: {str(last_err)}",
             }
             yield f"data: {json.dumps(error_event)}\n\n"
             yield "data: [DONE]\n\n"

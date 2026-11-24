@@ -120,6 +120,132 @@ async def test_provider_fallback_gate():
 
 
 @pytest.mark.asyncio
+async def test_missing_key_preflight_failover():
+    async def mock_gemini_stream(*args, **kwargs):
+        class MockDelta:
+            content = "Failover response from Gemini due to missing Anthropic key."
+
+        class MockChoice:
+            delta = MockDelta()
+
+        class MockChunk:
+            choices = [MockChoice()]
+
+        yield MockChunk()
+
+    orig_mock_mode = settings.mock_mode
+    orig_anthropic_key = settings.anthropic_api_key
+    orig_gemini_key = settings.gemini_api_key
+
+    settings.mock_mode = False
+    settings.anthropic_api_key = "your_anthropic_api_key_here"  # Unconfigured placeholder
+    settings.gemini_api_key = "valid_test_gemini_key"
+
+    try:
+        with patch("litellm.acompletion", side_effect=lambda model, *args, **kwargs: mock_gemini_stream()):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                payload = {
+                    "prompt": "Test query without Anthropic credentials",
+                    "provider": "anthropic",
+                    "prompt_version": "v1",
+                    "enable_pii_redaction": False,
+                }
+                events = []
+                async with client.stream("POST", "/v1/chat/stream", json=payload) as stream_resp:
+                    assert stream_resp.status_code == 200
+                    async for line in stream_resp.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[len("data: ") :]
+                        if data == "[DONE]":
+                            events.append({"type": "[DONE]"})
+                        else:
+                            events.append(json.loads(data))
+
+                # Ensure zero error events were emitted
+                error_events = [e for e in events if e.get("type") == "error"]
+                assert len(error_events) == 0, f"Unexpected error event: {error_events}"
+
+                telemetry_event = events[-2]
+                assert telemetry_event["type"] == "telemetry"
+                assert telemetry_event["fallback_triggered"] is True
+                assert "gemini" in telemetry_event["model_used"].lower()
+    finally:
+        settings.mock_mode = orig_mock_mode
+        settings.anthropic_api_key = orig_anthropic_key
+        settings.gemini_api_key = orig_gemini_key
+
+
+@pytest.mark.asyncio
+async def test_gemini_503_secondary_retry():
+    async def mock_secondary_gemini_stream(*args, **kwargs):
+        class MockDelta:
+            content = "Response from secondary Gemini 2.5 Flash after 503 spike."
+
+        class MockChoice:
+            delta = MockDelta()
+
+        class MockChunk:
+            choices = [MockChoice()]
+
+        yield MockChunk()
+
+    orig_mock_mode = settings.mock_mode
+    orig_gemini_key = settings.gemini_api_key
+    settings.mock_mode = False
+    settings.gemini_api_key = "valid_test_gemini_key"
+
+    try:
+        primary_model = settings.provider_models.get("gemini", "gemini/gemini-3.5-flash-lite")
+
+        async def mock_failing_primary(model, *args, **kwargs):
+            if model == primary_model:
+                raise litellm.APIError(
+                    status_code=503,
+                    message="503 UNAVAILABLE - The model is overloaded. Please try again later.",
+                    llm_provider="gemini",
+                    model=model,
+                )
+            elif "2.5-flash" in model or "2.0-flash" in model:
+                return mock_secondary_gemini_stream()
+            raise ValueError(f"Unexpected retry model: {model}")
+
+        with patch("litellm.acompletion", side_effect=mock_failing_primary):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                payload = {
+                    "prompt": "Test query hitting Gemini 503 spike",
+                    "provider": "gemini",
+                    "prompt_version": "v1",
+                    "enable_pii_redaction": False,
+                }
+                events = []
+                async with client.stream("POST", "/v1/chat/stream", json=payload) as stream_resp:
+                    assert stream_resp.status_code == 200
+                    async for line in stream_resp.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[len("data: ") :]
+                        if data == "[DONE]":
+                            events.append({"type": "[DONE]"})
+                        else:
+                            events.append(json.loads(data))
+
+                # Ensure zero error events were emitted
+                error_events = [e for e in events if e.get("type") == "error"]
+                assert len(error_events) == 0, f"Unexpected error event: {error_events}"
+
+                telemetry_event = events[-2]
+                assert telemetry_event["type"] == "telemetry"
+                assert telemetry_event["fallback_triggered"] is True
+                assert "2.5-flash" in telemetry_event["model_used"] or "2.0-flash" in telemetry_event["model_used"]
+    finally:
+        settings.mock_mode = orig_mock_mode
+        settings.gemini_api_key = orig_gemini_key
+
+
+@pytest.mark.asyncio
 async def test_metrics_endpoint_contract():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/v1/metrics")
