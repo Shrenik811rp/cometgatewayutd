@@ -6,6 +6,12 @@ interface TelemetryLedgerProps {
   metrics: MetricsSummary | null;
   onRefreshMetrics: () => void;
   loadingMetrics: boolean;
+  failoverInfo?: {
+    triggered: boolean;
+    requestedModel: string;
+    modelUsed: string;
+    reason?: string;
+  } | null;
 }
 
 export const TelemetryLedger: React.FC<TelemetryLedgerProps> = ({
@@ -13,6 +19,7 @@ export const TelemetryLedger: React.FC<TelemetryLedgerProps> = ({
   metrics,
   onRefreshMetrics,
   loadingMetrics,
+  failoverInfo,
 }) => {
   const [showAuditDrawer, setShowAuditDrawer] = useState(false);
 
@@ -80,11 +87,18 @@ export const TelemetryLedger: React.FC<TelemetryLedgerProps> = ({
         </table>
       </div>
 
-      {/* Fallback Warning Strip */}
-      {telemetry?.fallback_triggered && (
-        <div className="bg-[#FFEBE6] border-t-2 border-[#141413] px-5 py-2.5 font-mono text-xs font-bold text-[#E85D2A] flex items-center justify-between">
-          <span>⚠️ PROVIDER FAILOVER GATE → ROUTED THROUGH GEMINI FLASH-LITE / COMETAI ENCLAVE</span>
-          <span className="uppercase">STATUS: OK</span>
+      {/* Failover Status Banner */}
+      {(telemetry?.fallback_triggered || failoverInfo?.triggered) && (
+        <div className="bg-[#FFF3CD] border-t-2 border-[#141413] px-5 py-2.5 font-mono text-xs font-bold text-[#E85D2A] flex flex-wrap items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <span>⚡</span>
+            <span>
+              FAILOVER TAKING PLACE: {(failoverInfo?.requestedModel || telemetry?.requested_model || 'REQUESTED MODEL').toUpperCase()} UNAVAILABLE → AUTOMATICALLY SWITCHED TO {(failoverInfo?.modelUsed || telemetry?.model_used || 'ACTIVE GEMINI').toUpperCase()}
+            </span>
+          </span>
+          <span className="px-2 py-0.5 bg-[#E85D2A] text-white text-[10px] font-bold uppercase tracking-wider">
+            FAILOVER ACTIVE
+          </span>
         </div>
       )}
 

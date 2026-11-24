@@ -1,5 +1,6 @@
 import {
   ChatRequestPayload,
+  FailoverEvent,
   HealthStatus,
   MCPStatusResponse,
   MCPToolEvent,
@@ -12,6 +13,7 @@ import { API_BASE_URL } from './config';
 export interface StreamCallbacks {
   onPrivacy?: (data: PrivacyEvent) => void;
   onMCPTool?: (data: MCPToolEvent) => void;
+  onFailover?: (data: FailoverEvent) => void;
   onDelta?: (content: string) => void;
   onTelemetry?: (data: TelemetryEvent) => void;
   onDone?: () => void;
@@ -93,6 +95,8 @@ export async function streamChat(
             callbacks.onPrivacy?.(parsed as PrivacyEvent);
           } else if (parsed.type === 'mcp_tool') {
             callbacks.onMCPTool?.(parsed as MCPToolEvent);
+          } else if (parsed.type === 'failover') {
+            callbacks.onFailover?.(parsed as FailoverEvent);
           } else if (parsed.type === 'delta') {
             callbacks.onDelta?.(parsed.content || '');
           } else if (parsed.type === 'telemetry') {

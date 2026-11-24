@@ -1,13 +1,14 @@
 # CometGateway — Build Progress & Checkpoint Tracker
 
 ## Current Status
-- **Active Phase:** COMPLETE — Production Ready with Seamless Multi-Provider Fallback & 503 Retries
-- **Last Completed Checkpoint:** Pre-flight Missing Key Failover & Secondary Gemini 503 Spike Retries (19/19 tests passed)
+- **Active Phase:** COMPLETE — Production Ready with Instant Pre-Flight Failover & Failover Status Banners
+- **Last Completed Checkpoint:** Instant Pre-Flight Provider Resolution, 15s Per-Chunk Fast Timeout, Multi-Gemini Retry & Failover Status UI Banners
 - **Next Action:** Deployed on Render + Vercel; live at `http://localhost:5173`
 - **Known Issues / Notes:** All core phases (0-5), extensions (E.1-E.5, 7.1-7.6), and cloud deployment audit verified:
-  1. **Pre-Flight Missing Key Failover:** Clicking OpenAI, Claude, or CometAI without configured API keys immediately and cleanly routes to an active Gemini model with `fallback_triggered = True` and zero error banner.
-  2. **Secondary Gemini 503 Spike Retries:** Automatic failover to secondary Gemini (`gemini/gemini-2.5-flash` or `gemini/gemini-2.0-flash`) upon 503 high demand or rate limit spikes. Error events are only emitted if all candidate models fail and zero content tokens were streamed.
-  3. **Automated Verification:** 19/19 backend pytest suite passed (including `test_missing_key_preflight_failover` and `test_gemini_503_secondary_retry`). Both `master` and `main` branches synchronized on GitHub.
+  1. **Instant Pre-Flight Failover:** Selecting OpenAI, Claude, or CometAI without configured API keys bypasses doomed upstream network calls entirely and routes instantaneously to Gemini Flash-Lite.
+  2. **15s Stream Timeout & Unbroken Retries:** Connection timeout set to 15.0s, per-chunk streaming guarded by `asyncio.wait_for(..., timeout=15.0)`, and mid-stream errors reset partial buffers so secondary Gemini candidates deliver complete, unbroken responses.
+  3. **Failover UI Banners:** Both `StreamOutputPanel.tsx` and `TelemetryLedger.tsx` display real-time status banners: `⚡ FAILOVER TAKING PLACE: [REQUESTED_MODEL] UNAVAILABLE → AUTOMATICALLY SWITCHED TO [MODEL_USED]`.
+  4. **Automated Verification:** 19/19 backend pytest suite passed; frontend bundle passed `tsc && vite build` in 8.1s with 0 errors. Both `master` and `main` branches synchronized on GitHub.
 
 ---
 

@@ -79,6 +79,19 @@ def is_valid_key(key: Optional[str]) -> bool:
     return True
 
 
+def has_provider_key(provider: str) -> bool:
+    p = provider.lower()
+    if p in ["openai", "gpt"]:
+        return bool(settings.openai_api_key and settings.openai_api_key.strip() and is_valid_key(settings.openai_api_key))
+    if p in ["anthropic", "claude"]:
+        return bool(settings.anthropic_api_key and settings.anthropic_api_key.strip() and is_valid_key(settings.anthropic_api_key))
+    if p == "cometai":
+        return bool(settings.cometai_api_key and settings.cometai_api_key.strip() and is_valid_key(settings.cometai_api_key))
+    if p == "gemini":
+        return bool(settings.gemini_api_key and settings.gemini_api_key.strip() and is_valid_key(settings.gemini_api_key))
+    return False
+
+
 def get_model_for_request(request: ChatRequest) -> str:
     if request.model:
         return request.model
@@ -148,6 +161,8 @@ async def stream_model_response(
     first_chunk_time: Optional[float] = None
     accumulated_content = []
     fallback_triggered = False
+    fallback_reason: Optional[str] = None
+    requested_model: str = request.model or settings.provider_models.get(request.provider.lower(), model_name)
 
     # 3. Events: Delta stream
     if settings.mock_mode:
@@ -178,7 +193,10 @@ async def stream_model_response(
         ]
 
         async def get_litellm_stream(target_model: str):
-            extra_kwargs: Dict[str, Any] = {}
+            extra_kwargs: Dict[str, Any] = {
+                "max_tokens": 1024,
+                "timeout": 15.0,
+            }
             if "cometai" in target_model.lower() and settings.cometai_api_key:
                 extra_kwargs["api_base"] = settings.cometai_base_url
                 extra_kwargs["api_key"] = settings.cometai_api_key
@@ -196,47 +214,63 @@ async def stream_model_response(
                 **extra_kwargs,
             )
 
+        req_provider = request.provider.lower()
+        requested_model = request.model or settings.provider_models.get(req_provider, req_provider)
         primary_gemini = settings.provider_models.get("gemini", "gemini/gemini-3.5-flash-lite")
         gemini_secondaries = ["gemini/gemini-2.5-flash", "gemini/gemini-2.0-flash"]
 
-        # Pre-flight check: verify if requested provider has configured API key
-        req_provider = request.provider.lower()
-        has_key = True
-        if req_provider == "openai":
-            has_key = is_valid_key(settings.openai_api_key)
-        elif req_provider == "anthropic":
-            has_key = is_valid_key(settings.anthropic_api_key)
-        elif req_provider == "cometai":
-            has_key = is_valid_key(settings.cometai_api_key)
-        elif req_provider == "gemini":
-            has_key = is_valid_key(settings.gemini_api_key)
+        # Build deduplicated Gemini candidate chain
+        deduped_gemini_chain: List[str] = [primary_gemini]
+        for m in gemini_secondaries:
+            if m not in deduped_gemini_chain:
+                deduped_gemini_chain.append(m)
 
-        gemini_available = is_valid_key(settings.gemini_api_key) or bool(settings.gemini_api_key)
+        provider_has_key = has_provider_key(req_provider)
+        gemini_available = bool(settings.gemini_api_key and settings.gemini_api_key.strip())
+        fallback_reason: Optional[str] = None
 
         candidates: List[str] = []
-        if req_provider in ["openai", "anthropic", "cometai"] and not has_key and gemini_available:
-            # Immediate failover to Gemini without calling missing provider or emitting error banner
+        # Pre-flight check: If selected provider has no configured key and GEMINI_API_KEY is available,
+        # immediately failover to Gemini Flash-Lite without doing a doomed network call
+        if req_provider in ["openai", "anthropic", "claude", "cometai"] and not provider_has_key and gemini_available:
             fallback_triggered = True
-            candidates.append(primary_gemini)
-            for m in gemini_secondaries:
-                if m != primary_gemini and m not in candidates:
-                    candidates.append(m)
+            fallback_reason = f"{requested_model.upper()} API key not configured — failover taking place → switched to {primary_gemini}"
+            candidates.extend(deduped_gemini_chain)
+            # Emit failover event immediately so client UI shows failover banner right away
+            failover_event = {
+                "type": "failover",
+                "fallback_triggered": True,
+                "requested_model": requested_model,
+                "model_used": primary_gemini,
+                "reason": fallback_reason,
+            }
+            yield f"data: {json.dumps(failover_event)}\n\n"
         else:
             candidates.append(model_name)
-            if "gemini" not in model_name.lower() and primary_gemini not in candidates:
-                candidates.append(primary_gemini)
-            for m in gemini_secondaries:
-                if m not in candidates:
-                    candidates.append(m)
+            if gemini_available:
+                for gm in deduped_gemini_chain:
+                    if gm not in candidates:
+                        candidates.append(gm)
 
         last_err: Optional[Exception] = None
         for candidate in candidates:
-            if candidate != model_name:
+            if candidate != requested_model:
                 fallback_triggered = True
+                if not fallback_reason:
+                    fallback_reason = f"{requested_model.upper()} unavailable → automatically switched to {candidate}"
 
             try:
-                stream = await get_litellm_stream(candidate)
-                async for chunk in stream:
+                # 15.0s timeout to open upstream connection
+                stream = await asyncio.wait_for(get_litellm_stream(candidate), timeout=15.0)
+
+                # Iterate stream chunks with 15.0s per-chunk timeout so stalled connections never hang
+                gen_iter = stream.__aiter__()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(gen_iter.__anext__(), timeout=15.0)
+                    except StopAsyncIteration:
+                        break
+
                     if first_chunk_time is None:
                         first_chunk_time = time.perf_counter()
 
@@ -246,18 +280,24 @@ async def stream_model_response(
                         delta_event = {"type": "delta", "content": delta}
                         yield f"data: {json.dumps(delta_event)}\n\n"
 
-                # Successfully completed streaming from this candidate
+                # Successfully completed entire stream from this candidate
                 model_name = candidate
                 last_err = None
                 break
             except Exception as stream_err:
                 last_err = stream_err
                 fallback_triggered = True
-                # If content was already emitted to the user, do not restart with another model
+                # If error occurred mid-stream before completing, reset partial buffer so next candidate provides complete, unbroken response
                 if accumulated_content:
-                    model_name = candidate
-                    break
-                # Zero tokens were streamed: retry against next candidate model (e.g. secondary Gemini)
+                    accumulated_content = []
+                    reset_event = {
+                        "type": "failover",
+                        "fallback_triggered": True,
+                        "requested_model": requested_model,
+                        "model_used": candidate,
+                        "reset": True,
+                    }
+                    yield f"data: {json.dumps(reset_event)}\n\n"
                 continue
 
         # If all candidates failed and zero content tokens were streamed, emit graceful error event
@@ -296,6 +336,8 @@ async def stream_model_response(
         cost_usd=cost_usd,
         redacted_count=privacy_report.redacted_count,
         fallback_triggered=fallback_triggered,
+        fallback_reason=fallback_reason,
+        requested_model=requested_model,
         mcp_tools_used=mcp_tools_used,
     )
 

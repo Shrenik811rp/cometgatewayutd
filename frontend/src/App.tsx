@@ -34,6 +34,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [healthStatus, setHealthStatus] = useState<'online' | 'offline'>('offline');
+  const [failoverInfo, setFailoverInfo] = useState<{
+    triggered: boolean;
+    requestedModel: string;
+    modelUsed: string;
+    reason?: string;
+  } | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -110,6 +116,7 @@ export default function App() {
     setResponseText('');
     setPrivacyEvent(null);
     setMcpToolEvent(null);
+    setFailoverInfo(null);
     setIsStreaming(true);
 
     const controller = new AbortController();
@@ -125,9 +132,28 @@ export default function App() {
       {
         onPrivacy: (p) => setPrivacyEvent(p),
         onMCPTool: (m) => setMcpToolEvent(m),
+        onFailover: (f) => {
+          setFailoverInfo({
+            triggered: true,
+            requestedModel: f.requested_model,
+            modelUsed: f.model_used,
+            reason: f.reason,
+          });
+          if (f.reset) {
+            setResponseText('');
+          }
+        },
         onDelta: (chunk) => setResponseText((prev) => prev + chunk),
         onTelemetry: (t) => {
           setTelemetry(t);
+          if (t.fallback_triggered) {
+            setFailoverInfo((prev) => ({
+              triggered: true,
+              requestedModel: prev?.requestedModel || t.requested_model || MODEL_MAP[provider],
+              modelUsed: t.model_used,
+              reason: t.fallback_reason || prev?.reason,
+            }));
+          }
           setHealthStatus('online');
           setHealth((prev) => prev ?? { status: 'ok', mock_mode: true });
           handleRefreshMetrics();
@@ -199,8 +225,9 @@ export default function App() {
         <StreamOutputPanel
           responseText={responseText}
           isStreaming={isStreaming}
-          activeModel={activeModelDisplay}
+          activeModel={failoverInfo?.modelUsed || activeModelDisplay}
           error={error}
+          failoverInfo={failoverInfo}
         />
 
         {/* Bottom Telemetry & Gateway Audit Grid */}
@@ -209,6 +236,7 @@ export default function App() {
           metrics={metrics}
           onRefreshMetrics={handleRefreshMetrics}
           loadingMetrics={loadingMetrics}
+          failoverInfo={failoverInfo}
         />
       </main>
 

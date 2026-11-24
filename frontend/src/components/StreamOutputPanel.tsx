@@ -5,6 +5,12 @@ interface StreamOutputPanelProps {
   isStreaming: boolean;
   activeModel: string;
   error: string | null;
+  failoverInfo?: {
+    triggered: boolean;
+    requestedModel: string;
+    modelUsed: string;
+    reason?: string;
+  } | null;
 }
 
 const ROUTING_MATRIX = [
@@ -43,6 +49,7 @@ export const StreamOutputPanel: React.FC<StreamOutputPanelProps> = ({
   isStreaming,
   activeModel,
   error,
+  failoverInfo,
 }) => {
   const [copied, setCopied] = useState(false);
 
@@ -156,6 +163,21 @@ export const StreamOutputPanel: React.FC<StreamOutputPanelProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Failover Status Banner */}
+      {failoverInfo?.triggered && (
+        <div className="bg-[#FFF3CD] border-b-2 border-[#141413] px-5 py-2.5 font-mono text-xs font-bold text-[#E85D2A] flex flex-wrap items-center justify-between gap-2 tracking-wide">
+          <span className="flex items-center gap-2">
+            <span>⚡</span>
+            <span>
+              FAILOVER TAKING PLACE: {failoverInfo.requestedModel.toUpperCase()} UNAVAILABLE → AUTOMATICALLY SWITCHED TO {failoverInfo.modelUsed.toUpperCase()}
+            </span>
+          </span>
+          <span className="px-2 py-0.5 bg-[#E85D2A] text-white text-[10px] font-bold uppercase tracking-wider">
+            FAILOVER ACTIVE
+          </span>
+        </div>
+      )}
 
       {/* Error Banner */}
       {error && (

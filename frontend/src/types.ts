@@ -21,6 +21,15 @@ export interface MCPToolEvent {
   output: any;
 }
 
+export interface FailoverEvent {
+  type: 'failover';
+  fallback_triggered: boolean;
+  requested_model: string;
+  model_used: string;
+  reason?: string;
+  reset?: boolean;
+}
+
 export interface ErrorEvent {
   type: 'error';
   message: string;
@@ -44,10 +53,12 @@ export interface TelemetryEvent {
   cost_usd: number;
   redacted_count: number;
   fallback_triggered: boolean;
+  fallback_reason?: string;
+  requested_model?: string;
   mcp_tools_used?: string[];
 }
 
-export type SSEEvent = PrivacyEvent | MCPToolEvent | DeltaEvent | TelemetryEvent | ErrorEvent;
+export type SSEEvent = PrivacyEvent | MCPToolEvent | FailoverEvent | DeltaEvent | TelemetryEvent | ErrorEvent;
 
 export interface MCPToolInfo {
   name: string;

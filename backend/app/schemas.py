@@ -36,6 +36,8 @@ class TelemetryMetrics(BaseModel):
     cost_usd: float
     redacted_count: int
     fallback_triggered: bool = False
+    fallback_reason: Optional[str] = None
+    requested_model: Optional[str] = None
     mcp_tools_used: List[str] = Field(default_factory=list)
 
 
